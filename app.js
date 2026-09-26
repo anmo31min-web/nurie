@@ -263,7 +263,16 @@ function components(labels,W,H){
 
 function mergeSmall(labels,centers,W,H,minArea){
   const {map,comps}=components(labels,W,H);
-  const small=comps.filter(c=>c.area<minArea);
+  const small=comps.filter(c=>{
+    let minX=W,minY=H,maxX=0,maxY=0;
+    for(const i of c.pixels){
+      const x=i%W,y=(i/W)|0;
+      if(x<minX)minX=x;if(x>maxX)maxX=x;
+      if(y<minY)minY=y;if(y>maxY)maxY=y;
+    }
+    const shortSide=Math.min(maxX-minX+1,maxY-minY+1);
+    return c.area<minArea || (shortSide<9 && c.area<minArea*3);
+  });
   if(!small.length)return false;
 
   const out=new Int16Array(labels);
