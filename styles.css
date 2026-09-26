@@ -1,4 +1,6 @@
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+.revealNote{height:38px;overflow:hidden;font-size:12px;color:#9a526d;text-align:center;line-height:1.5;padding:2px 0}
+.completed .revealNote{display:none}
 :root{--ink:#56494d;--paper:#fff8f2;--line:#e7d8d5;--accent:#d8728d}
 html,body{margin:0;min-height:100%;background:#eee7e3;color:var(--ink);font-family:"Hiragino Maru Gothic ProN","Yu Gothic",system-ui,sans-serif;overscroll-behavior:none}
 body{display:flex;justify-content:center}

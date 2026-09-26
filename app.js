@@ -50,6 +50,7 @@ const S = {
   filledCount:0,
   total:0,
   hiddenLabels:0,
+  reveals:[],
   loadSerial:0,
   ready:false,
   fit:{x:0,y:0,w:1,h:1},
@@ -59,6 +60,8 @@ const S = {
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const rgb=c=>'rgb('+c[0]+','+c[1]+','+c[2]+')';
 const tick=()=>new Promise(r=>requestAnimationFrame(r));
+let revealFrame=0;
+const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
 
 function showStatus(text){
   E.status.classList.remove('error');
@@ -79,6 +82,7 @@ function loadImage(src){
 function snapshotPuzzle(){
   return {
     ...S,
+    reveals:S.reveals.map(r=>r?{...r}:null),
     regions:S.regions.map(r=>({...r,pixels:r.pixels})),
     view:{...S.view},
     doneVisible:E.done.classList.contains('show'),
@@ -93,6 +97,7 @@ function restorePuzzle(snapshot){
   if(E.noteText)E.noteText.textContent=snapshot.noteText;
   if(S.W&&S.H){raster.width=S.W;raster.height=S.H;}
   if(S.regions.length){renderPalette();resize();draw();}
+  scheduleReveal();
 }
 
 let lastGoodPuzzle=null;
@@ -100,6 +105,8 @@ async function useSource(src,ownedUrl=null){
   const serial=++S.loadSerial;
   if(S.ready)lastGoodPuzzle=snapshotPuzzle();
   const previous=lastGoodPuzzle;
+  cancelAnimationFrame(revealFrame);revealFrame=0;
+  $('#revealNote').textContent='';
   pointers.clear();
   S.ready=false;
   E.uploadBtn.disabled=true;
@@ -565,8 +572,8 @@ function mergeSmallRegionsSequential(labels,lab,paletteLab,W,H){
   }
 
   const scale=Math.max(W,H)/512;
-  const minArea=Math.max(18,Math.round(64*scale*scale));
-  const minRadius=Math.max(2.4,5*scale);
+  const minArea=Math.max(8,Math.round(24*scale*scale));
+  const minRadius=Math.max(1.4,2.5*scale);
   const order=comps.slice().sort((a,b)=>a.area-b.area);
   // Keep the widest connected patch of every color: otherwise increasing
   // the palette can paradoxically erase more colors during cleanup.
@@ -805,6 +812,9 @@ function compactPalette(){
 }
 
 function resetPuzzle(){
+  cancelAnimationFrame(revealFrame);revealFrame=0;
+  S.reveals=[];
+  $('#revealNote').textContent='';
   for(const r of S.regions)r.filled=false;
   S.filledCount=0;
   S.selected=0;
@@ -898,19 +908,52 @@ function setCompleted(completed){
   E.done.querySelector('details').open=false;
 }
 
+function beginReveal(color,x,y){
+  S.reveals[color]={x,y,start:performance.now(),progress:0,
+    radius:Math.max(Math.hypot(x,y),Math.hypot(S.W-x,y),Math.hypot(x,S.H-y),Math.hypot(S.W-x,S.H-y))+12};
+  $('#revealNote').textContent=S.filledCount===S.total
+    ? 'すべて塗れました。最後の色が、イラストに変わります…'
+    : `${color+1}番を塗り終えました。イラストに変わります…`;
+  scheduleReveal();
+}
+
+function scheduleReveal(){
+  if(revealFrame||!S.ready||!S.reveals.some(r=>r&&r.progress<1))return;
+  revealFrame=requestAnimationFrame(animateReveal);
+}
+
+function animateReveal(now){
+  revealFrame=0;
+  if(!S.ready)return;
+  for(const r of S.reveals){
+    if(r&&r.progress<1)r.progress=clamp((now-r.start-900)/1800,0,1);
+  }
+  draw();
+  if(S.reveals.some(r=>r&&r.progress<1)){scheduleReveal();return;}
+  $('#revealNote').textContent='';
+  if(S.filledCount===S.total){setCompleted(true);resetView();}
+}
+
 function draw(){
   if(!S.ready||!S.regionMap||!S.regions.length)return;
   const W=S.W,H=S.H,N=W*H;
   const image=rctx.createImageData(W,H),d=image.data;
-  const revealed=S.palette.map((_,color)=>colorFinished(color));
 
   for(let i=0;i<N;i++){
     const rid=S.regionMap[i],r=S.regions[rid],p=i*4;
     if(r.filled){
-      // Completing a number reveals its original colors and texture together.
-      if(revealed[r.color])continue;
+      const reveal=S.reveals[r.color];
+      if(reveal?.progress===1)continue;
       const c=S.palette[r.color];
       d[p]=c[0];d[p+1]=c[1];d[p+2]=c[2];
+      let amount=0;
+      if(reveal?.progress>0){
+        const t=reveal.progress, eased=t*t*(3-2*t);
+        const distance=Math.hypot(i%W+.5-reveal.x,Math.floor(i/W)+.5-reveal.y);
+        amount=reducedMotion.matches?t:clamp((eased*reveal.radius-distance)/10,0,1);
+      }
+      d[p+3]=Math.round(255*(1-amount));
+      continue;
     }else{
       const active=r.color===S.selected;
       if(active){
@@ -954,7 +997,7 @@ function draw(){
   ctx.imageSmoothingEnabled=true;
   ctx.imageSmoothingQuality='high';
   ctx.drawImage(S.image,f.x,f.y,f.w,f.h);
-  if(S.filledCount<S.total)ctx.drawImage(raster,f.x,f.y,f.w,f.h);
+  ctx.drawImage(raster,f.x,f.y,f.w,f.h);
   drawNumbers(f);
 }
 
@@ -1007,6 +1050,8 @@ function tap(ev){
 
   if(colorFinished(S.selected)){
     const start=S.selected;
+    const point=canvasPoint(ev),f=S.fit;
+    beginReveal(start,(point.x-f.x)/f.w*S.W,(point.y-f.y)/f.h*S.H);
     for(let n=1;n<=S.palette.length;n++){
       const c=(start+n)%S.palette.length;
       if(!colorFinished(c)){S.selected=c;break}
@@ -1015,7 +1060,6 @@ function tap(ev){
   renderPalette();
   draw();
 
-  if(S.filledCount===S.total){setCompleted(true);resetView();}
 }
 
 const pointers=new Map();
