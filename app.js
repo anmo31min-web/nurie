@@ -26,11 +26,13 @@ const S = {
   image:null,
   imageUrl:null,
   W:0,H:0,
-  source:null,
+  filtered:null,
+  lab:null,
   labels:null,
-  regions:[],
   regionMap:null,
+  regions:[],
   palette:[],
+  paletteLab:[],
   selected:0,
   filledCount:0,
   total:0,
@@ -39,18 +41,14 @@ const S = {
 };
 
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
-const rgb=c=>`rgb(${c[0]},${c[1]},${c[2]})`;
-const colorDist=(a,b)=>{
-  const dr=a[0]-b[0],dg=a[1]-b[1],db=a[2]-b[2];
-  return dr*dr*.8+dg*dg+db*db*.7;
-};
+const rgb=c=>'rgb('+c[0]+','+c[1]+','+c[2]+')';
 const tick=()=>new Promise(r=>requestAnimationFrame(r));
 
 function showStatus(text){
   E.status.textContent=text;
   E.status.classList.remove('hide');
 }
-function hideStatus(){E.status.classList.add('hide')}
+function hideStatus(){ E.status.classList.add('hide'); }
 
 function loadImage(src){
   return new Promise((resolve,reject)=>{
@@ -63,8 +61,8 @@ function loadImage(src){
 
 async function useSource(src){
   S.ready=false;
-  showStatus('画像を読み込んでいます…');
   E.done.classList.remove('show');
+  showStatus('画像を読み込んでいます…');
   try{
     S.image=await loadImage(src);
     await buildPuzzle();
@@ -75,66 +73,82 @@ async function useSource(src){
 }
 
 async function buildPuzzle(){
-  showStatus('色を8色にまとめています…');
-  await tick();
-
-  const maxW=200,maxH=356;
   const ar=S.image.naturalWidth/S.image.naturalHeight;
+  const longSide=512;
   let W,H;
-  if(ar>=maxW/maxH){W=maxW;H=Math.max(120,Math.round(W/ar))}
-  else{H=maxH;W=Math.max(120,Math.round(H*ar))}
-  S.W=W;S.H=H;
+  if(ar>=1){
+    W=Math.min(longSide,S.image.naturalWidth);
+    H=Math.max(1,Math.round(W/ar));
+  }else{
+    H=Math.min(longSide,S.image.naturalHeight);
+    W=Math.max(1,Math.round(H*ar));
+  }
+  if(Math.max(S.image.naturalWidth,S.image.naturalHeight)<longSide){
+    W=S.image.naturalWidth;
+    H=S.image.naturalHeight;
+  }
+  S.W=W; S.H=H;
 
-  work.width=W;work.height=H;
+  work.width=W; work.height=H;
   wctx.clearRect(0,0,W,H);
   wctx.fillStyle='#fff';
   wctx.fillRect(0,0,W,H);
   wctx.drawImage(S.image,0,0,W,H);
 
-  // 軽い平滑化。細かな色ムラを先に丸める。
-  let img=wctx.getImageData(0,0,W,H);
-  img=boxBlur(img,W,H,1);
-  S.source=img.data;
+  showStatus('色ムラをならしています…');
+  await tick();
+  const original=wctx.getImageData(0,0,W,H);
+  const filtered=await bilateralFilter(original,W,H,2,25);
+  S.filtered=filtered.data;
 
-  const samples=[];
-  const N=W*H;
-  const stride=Math.max(1,Math.floor(N/9000));
-  for(let i=0;i<N;i+=stride){
-    const p=i*4;
-    samples.push([S.source[p],S.source[p+1],S.source[p+2]]);
+  showStatus('8色にまとめています…');
+  await tick();
+  S.lab=rgbDataToLab(S.filtered,W*H);
+
+  const sampleIdx=randomSampleIndices(W*H,Math.min(10000,W*H),20260926);
+  const samples=sampleIdx.map(i=>[
+    S.lab[i*3],
+    S.lab[i*3+1],
+    S.lab[i*3+2]
+  ]);
+
+  let centers=kmeansPlusPlus(samples,8,20260926);
+  centers=lloyd(samples,centers,20);
+  if(!centers.length) throw new Error('palette generation failed');
+
+  const labels=new Int16Array(W*H);
+  const sums=centers.map(()=>[0,0,0,0]);
+  for(let i=0;i<W*H;i++){
+    const o=i*3;
+    const lab=[S.lab[o],S.lab[o+1],S.lab[o+2]];
+    const k=nearestCenter(lab,centers);
+    labels[i]=k;
+    const p=i*4,z=sums[k];
+    z[0]+=S.filtered[p];
+    z[1]+=S.filtered[p+1];
+    z[2]+=S.filtered[p+2];
+    z[3]++;
   }
 
-  let centers=seedCenters(samples,8);
-  for(let i=0;i<10;i++) centers=kMeansStep(samples,centers);
+  S.palette=sums.map((z,i)=>{
+    if(!z[3]) return labToRgb(centers[i]);
+    return [
+      Math.round(z[0]/z[3]),
+      Math.round(z[1]/z[3]),
+      Math.round(z[2]/z[3])
+    ];
+  });
+  S.paletteLab=centers.map(c=>c.slice());
 
-  let labels=new Int16Array(N);
-  for(let i=0;i<N;i++){
-    const p=i*4;
-    const c=[S.source[p],S.source[p+1],S.source[p+2]];
-    let best=0,bd=Infinity;
-    for(let k=0;k<centers.length;k++){
-      const d=colorDist(c,centers[k]);
-      if(d<bd){bd=d;best=k}
-    }
-    labels[i]=best;
-  }
-
-  // 量子化後の1pxノイズを多数決で消す。
-  labels=majoritySmooth(labels,W,H,3);
-
-  showStatus('小さな領域をまとめています…');
+  showStatus('小さな領域を整理しています…');
   await tick();
 
-  // 小片は、接している領域のうち境界が長く、色も近い側へ統合。
-  const minArea=Math.max(70,Math.round(N*0.0017));
-  for(let pass=0;pass<6;pass++){
-    const changed=mergeSmall(labels,centers,W,H,minArea);
-    labels=majoritySmooth(labels,W,H,1);
-    if(!changed)break;
-  }
-
   S.labels=labels;
-  S.palette=centers.map(c=>c.map(v=>Math.round(v)));
+  for(let pass=0;pass<3;pass++){
+    const merged=mergeSmallRegionsSequential(S.labels,S.lab,S.paletteLab,W,H);
+    if(!merged)break;
+    await tick();
+  }
 
   showStatus('番号を置いています…');
   await tick();
@@ -148,85 +162,182 @@ async function buildPuzzle(){
   hideStatus();
 }
 
-function boxBlur(image,W,H,r){
+async function bilateralFilter(image,W,H,radius,sigmaColor){
   const src=image.data;
   const out=new ImageData(W,H);
   const dst=out.data;
+  const sigmaSpace=2;
+  const invSpace=1/(2*sigmaSpace*sigmaSpace);
+  const invColor=1/(2*sigmaColor*sigmaColor);
+  const kernel=[];
+
+  for(let dy=-radius;dy<=radius;dy++){
+    for(let dx=-radius;dx<=radius;dx++){
+      kernel.push({
+        dx,dy,
+        ws:Math.exp(-(dx*dx+dy*dy)*invSpace)
+      });
+    }
+  }
+
   for(let y=0;y<H;y++){
+    if((y&31)===0) await tick();
     for(let x=0;x<W;x++){
-      let sr=0,sg=0,sb=0,n=0;
-      for(let yy=Math.max(0,y-r);yy<=Math.min(H-1,y+r);yy++){
-        for(let xx=Math.max(0,x-r);xx<=Math.min(W-1,x+r);xx++){
-          const p=(yy*W+xx)*4;
-          sr+=src[p];sg+=src[p+1];sb+=src[p+2];n++;
-        }
+      const cp=(y*W+x)*4;
+      const cr=src[cp],cg=src[cp+1],cb=src[cp+2];
+      let sr=0,sg=0,sb=0,sw=0;
+
+      for(const q of kernel){
+        const xx=clamp(x+q.dx,0,W-1);
+        const yy=clamp(y+q.dy,0,H-1);
+        const p=(yy*W+xx)*4;
+        const dr=src[p]-cr,dg=src[p+1]-cg,db=src[p+2]-cb;
+        const wc=Math.exp(-(dr*dr+dg*dg+db*db)*invColor);
+        const w=q.ws*wc;
+        sr+=src[p]*w;
+        sg+=src[p+1]*w;
+        sb+=src[p+2]*w;
+        sw+=w;
       }
-      const p=(y*W+x)*4;
-      dst[p]=sr/n;dst[p+1]=sg/n;dst[p+2]=sb/n;dst[p+3]=255;
+
+      dst[cp]=sr/sw;
+      dst[cp+1]=sg/sw;
+      dst[cp+2]=sb/sw;
+      dst[cp+3]=255;
     }
   }
   return out;
 }
 
-function seedCenters(samples,k){
-  const centers=[samples[Math.floor(samples.length*.37)].slice()];
+function srgbLinear(v){
+  v/=255;
+  return v<=0.04045 ? v/12.92 : Math.pow((v+0.055)/1.055,2.4);
+}
+
+function rgbToLab(r,g,b){
+  r=srgbLinear(r); g=srgbLinear(g); b=srgbLinear(b);
+  const X=(r*.4124564+g*.3575761+b*.1804375)/.95047;
+  const Y=(r*.2126729+g*.7151522+b*.0721750);
+  const Z=(r*.0193339+g*.1191920+b*.9503041)/1.08883;
+  const e=216/24389,k=24389/27;
+  const f=t=>t>e?Math.cbrt(t):(k*t+16)/116;
+  const fx=f(X),fy=f(Y),fz=f(Z);
+  return [116*fy-16,500*(fx-fy),200*(fy-fz)];
+}
+
+function rgbDataToLab(data,N){
+  const out=new Float32Array(N*3);
+  for(let i=0;i<N;i++){
+    const p=i*4,l=rgbToLab(data[p],data[p+1],data[p+2]),o=i*3;
+    out[o]=l[0];out[o+1]=l[1];out[o+2]=l[2];
+  }
+  return out;
+}
+
+function labToRgb(lab){
+  let fy=(lab[0]+16)/116;
+  let fx=lab[1]/500+fy;
+  let fz=fy-lab[2]/200;
+  const e=216/24389,k=24389/27;
+  const finv=t=>{
+    const t3=t*t*t;
+    return t3>e?t3:(116*t-16)/k;
+  };
+  let X=.95047*finv(fx),Y=finv(fy),Z=1.08883*finv(fz);
+  let r= 3.2404542*X-1.5371385*Y-0.4985314*Z;
+  let g=-0.9692660*X+1.8760108*Y+0.0415560*Z;
+  let b= 0.0556434*X-0.2040259*Y+1.0572252*Z;
+  const enc=v=>{
+    v=v<=.0031308?12.92*v:1.055*Math.pow(v,1/2.4)-.055;
+    return Math.round(clamp(v,0,1)*255);
+  };
+  return [enc(r),enc(g),enc(b)];
+}
+
+function deltaE2(a,b){
+  const d0=a[0]-b[0],d1=a[1]-b[1],d2=a[2]-b[2];
+  return d0*d0+d1*d1+d2*d2;
+}
+
+function nearestCenter(v,centers){
+  let bi=0,bd=Infinity;
+  for(let k=0;k<centers.length;k++){
+    const d=deltaE2(v,centers[k]);
+    if(d<bd){bd=d;bi=k}
+  }
+  return bi;
+}
+
+function makeRng(seed){
+  let s=seed>>>0;
+  return ()=>{
+    s=(1664525*s+1013904223)>>>0;
+    return s/4294967296;
+  };
+}
+
+function randomSampleIndices(N,count,seed){
+  if(count>=N) return Array.from({length:N},(_,i)=>i);
+  const rng=makeRng(seed);
+  const step=N/count;
+  const out=[];
+  for(let i=0;i<count;i++){
+    const start=Math.floor(i*step);
+    const end=Math.max(start+1,Math.floor((i+1)*step));
+    out.push(Math.min(N-1,start+Math.floor(rng()*(end-start))));
+  }
+  return out;
+}
+
+function kmeansPlusPlus(samples,k,seed){
+  if(!samples.length)return [];
+  const rng=makeRng(seed);
+  const centers=[samples[Math.floor(rng()*samples.length)].slice()];
+
   while(centers.length<k){
-    let pick=samples[0],best=-1;
-    const stride=Math.max(1,Math.floor(samples.length/2200));
-    for(let i=0;i<samples.length;i+=stride){
-      const s=samples[i];
-      let nearest=Infinity;
-      for(const c of centers)nearest=Math.min(nearest,colorDist(s,c));
-      if(nearest>best){best=nearest;pick=s}
+    const weights=new Float64Array(samples.length);
+    let total=0;
+    for(let i=0;i<samples.length;i++){
+      let md=Infinity;
+      for(const c of centers) md=Math.min(md,deltaE2(samples[i],c));
+      weights[i]=md;
+      total+=md;
     }
-    centers.push(pick.slice());
+    if(total<=1e-9)break;
+    let target=rng()*total,pick=samples.length-1;
+    for(let i=0;i<weights.length;i++){
+      target-=weights[i];
+      if(target<=0){pick=i;break}
+    }
+    centers.push(samples[pick].slice());
   }
   return centers;
 }
 
-function kMeansStep(samples,centers){
-  const sums=centers.map(()=>[0,0,0,0]);
-  for(const s of samples){
-    let bi=0,bd=Infinity;
-    for(let k=0;k<centers.length;k++){
-      const d=colorDist(s,centers[k]);
-      if(d<bd){bd=d;bi=k}
+function lloyd(samples,centers,maxIter){
+  let c=centers.map(x=>x.slice());
+  for(let iter=0;iter<maxIter;iter++){
+    const sums=c.map(()=>[0,0,0,0]);
+    for(const s of samples){
+      const k=nearestCenter(s,c),z=sums[k];
+      z[0]+=s[0];z[1]+=s[1];z[2]+=s[2];z[3]++;
     }
-    const z=sums[bi];
-    z[0]+=s[0];z[1]+=s[1];z[2]+=s[2];z[3]++;
+    let move=0;
+    for(let k=0;k<c.length;k++){
+      const z=sums[k];
+      if(!z[3])continue;
+      const n=[z[0]/z[3],z[1]/z[3],z[2]/z[3]];
+      move+=deltaE2(c[k],n);
+      c[k]=n;
+    }
+    if(move/c.length<.02)break;
   }
-  return centers.map((c,i)=>{
-    const z=sums[i];
-    return z[3]?[z[0]/z[3],z[1]/z[3],z[2]/z[3]]:c;
-  });
+  return c;
 }
 
-function majoritySmooth(labels,W,H,passes){
-  let cur=labels;
-  for(let pass=0;pass<passes;pass++){
-    const out=new Int16Array(cur);
-    for(let y=1;y<H-1;y++){
-      for(let x=1;x<W-1;x++){
-        const i=y*W+x;
-        const count=new Int16Array(8);
-        for(let yy=-1;yy<=1;yy++){
-          for(let xx=-1;xx<=1;xx++){
-            count[cur[(y+yy)*W+x+xx]]++;
-          }
-        }
-        let best=cur[i],n=count[best];
-        for(let k=0;k<8;k++)if(count[k]>n){n=count[k];best=k}
-        if(n>=5)out[i]=best;
-      }
-    }
-    cur=out;
-  }
-  return cur;
-}
-
-function components(labels,W,H){
+function components(labels,W,H,lab){
   const N=W*H;
-  const map=new Int32Array(N);map.fill(-1);
+  const map=new Int32Array(N); map.fill(-1);
   const queue=new Int32Array(N);
   const comps=[];
   let id=0;
@@ -238,10 +349,13 @@ function components(labels,W,H){
     queue[tail++]=start;
     map[start]=id;
     const pixels=[];
+    let sL=0,sA=0,sB=0;
 
     while(head<tail){
       const i=queue[head++];
       pixels.push(i);
+      const o=i*3;
+      if(lab){sL+=lab[o];sA+=lab[o+1];sB+=lab[o+2]}
       const x=i%W;
       if(x>0)visit(i-1);
       if(x<W-1)visit(i+1);
@@ -255,133 +369,213 @@ function components(labels,W,H){
         }
       }
     }
-    comps.push({id,label,pixels,area:pixels.length});
+
+    const area=pixels.length;
+    comps.push({
+      id,label,pixels,area,active:true,
+      sumLab:[sL,sA,sB],
+      meanLab:lab?[sL/area,sA/area,sB/area]:null,
+      neighbors:new Map(),
+      perimeter:0,
+      rMax:0
+    });
     id++;
   }
+
   return {map,comps};
 }
 
-function mergeSmall(labels,centers,W,H,minArea){
-  const {map,comps}=components(labels,W,H);
-  const small=comps.filter(c=>{
-    let minX=W,minY=H,maxX=0,maxY=0;
-    for(const i of c.pixels){
-      const x=i%W,y=(i/W)|0;
-      if(x<minX)minX=x;if(x>maxX)maxX=x;
-      if(y<minY)minY=y;if(y>maxY)maxY=y;
-    }
-    const shortSide=Math.min(maxX-minX+1,maxY-minY+1);
-    return c.area<minArea || (shortSide<9 && c.area<minArea*3);
-  });
-  if(!small.length)return false;
+function buildAdjacency(map,comps,W,H){
+  const N=W*H;
+  for(const c of comps){
+    c.neighbors=new Map();
+    c.perimeter=0;
+  }
 
-  const out=new Int16Array(labels);
-  let changed=false;
+  function edge(a,b){
+    comps[a].perimeter++;
+    comps[b].perimeter++;
+    comps[a].neighbors.set(b,(comps[a].neighbors.get(b)||0)+1);
+    comps[b].neighbors.set(a,(comps[b].neighbors.get(a)||0)+1);
+  }
 
-  for(const c of small){
-    const neighbors=new Map();
-
-    for(const i of c.pixels){
-      const x=i%W;
-      const ns=[];
-      if(x>0)ns.push(i-1);
-      if(x<W-1)ns.push(i+1);
-      if(i>=W)ns.push(i-W);
-      if(i<W*H-W)ns.push(i+W);
-
-      for(const n of ns){
-        const cid=map[n];
-        if(cid===c.id)continue;
-        const other=comps[cid];
-        if(!other)continue;
-        const key=other.label;
-        neighbors.set(key,(neighbors.get(key)||0)+1);
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
+      const i=y*W+x,a=map[i];
+      if(x===0)comps[a].perimeter++;
+      if(y===0)comps[a].perimeter++;
+      if(x===W-1)comps[a].perimeter++;
+      else{
+        const b=map[i+1];
+        if(a!==b)edge(a,b);
+      }
+      if(y===H-1)comps[a].perimeter++;
+      else{
+        const b=map[i+W];
+        if(a!==b)edge(a,b);
       }
     }
+  }
+}
 
-    let bestLabel=-1,bestScore=-Infinity;
-    for(const [label,boundary] of neighbors){
-      const dist=Math.sqrt(colorDist(centers[c.label],centers[label]));
-      const score=boundary*8-dist*.08;
-      if(score>bestScore){bestScore=score;bestLabel=label}
-    }
+function chamferDistance(map,W,H){
+  const N=W*H,INF=60000;
+  const d=new Uint16Array(N);
+  d.fill(INF);
 
-    if(bestLabel>=0&&bestLabel!==c.label){
-      for(const i of c.pixels)out[i]=bestLabel;
-      changed=true;
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
+      const i=y*W+x,r=map[i];
+      if(x===0||y===0||x===W-1||y===H-1||
+         map[i-1]!==r||map[i+1]!==r||map[i-W]!==r||map[i+W]!==r){
+        d[i]=0;
+      }
     }
   }
 
-  labels.set(out);
-  return changed;
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
+      const i=y*W+x,r=map[i];
+      let v=d[i];
+      if(x>0&&map[i-1]===r)v=Math.min(v,d[i-1]+10);
+      if(y>0&&map[i-W]===r)v=Math.min(v,d[i-W]+10);
+      if(x>0&&y>0&&map[i-W-1]===r)v=Math.min(v,d[i-W-1]+14);
+      if(x<W-1&&y>0&&map[i-W+1]===r)v=Math.min(v,d[i-W+1]+14);
+      d[i]=v;
+    }
+  }
+
+  for(let y=H-1;y>=0;y--){
+    for(let x=W-1;x>=0;x--){
+      const i=y*W+x,r=map[i];
+      let v=d[i];
+      if(x<W-1&&map[i+1]===r)v=Math.min(v,d[i+1]+10);
+      if(y<H-1&&map[i+W]===r)v=Math.min(v,d[i+W]+10);
+      if(x<W-1&&y<H-1&&map[i+W+1]===r)v=Math.min(v,d[i+W+1]+14);
+      if(x>0&&y<H-1&&map[i+W-1]===r)v=Math.min(v,d[i+W-1]+14);
+      d[i]=v;
+    }
+  }
+  return d;
+}
+
+function mergeSmallRegionsSequential(labels,lab,paletteLab,W,H){
+  const built=components(labels,W,H,lab);
+  const map=built.map, comps=built.comps;
+  if(comps.length<=1)return false;
+
+  buildAdjacency(map,comps,W,H);
+  const dist=chamferDistance(map,W,H);
+
+  for(let i=0;i<map.length;i++){
+    const c=comps[map[i]];
+    const r=dist[i]/10;
+    if(r>c.rMax)c.rMax=r;
+  }
+
+  const scale=Math.max(W,H)/512;
+  const minArea=Math.max(18,Math.round(64*scale*scale));
+  const minRadius=Math.max(2.4,5*scale);
+  const order=comps.slice().sort((a,b)=>a.area-b.area);
+  let mergedAny=false;
+
+  for(const a of order){
+    if(!a.active)continue;
+    const tooSmall=a.area<minArea;
+    const tooThin=a.rMax<minRadius;
+    if(!tooSmall&&!tooThin)continue;
+
+    let best=null,bestScore=Infinity;
+    for(const [bid,shared] of a.neighbors){
+      const b=comps[bid];
+      if(!b||!b.active||b.id===a.id)continue;
+      const de=Math.sqrt(deltaE2(a.meanLab,paletteLab[b.label]));
+      const contact=shared/Math.max(1,a.perimeter);
+      const score=de/20+(1-contact);
+      if(score<bestScore){
+        bestScore=score;
+        best={b,shared};
+      }
+    }
+    if(!best)continue;
+
+    const b=best.b,shared=best.shared;
+    for(const p of a.pixels){
+      labels[p]=b.label;
+      map[p]=b.id;
+      b.pixels.push(p);
+    }
+
+    b.area+=a.area;
+    b.sumLab[0]+=a.sumLab[0];
+    b.sumLab[1]+=a.sumLab[1];
+    b.sumLab[2]+=a.sumLab[2];
+    b.meanLab=[
+      b.sumLab[0]/b.area,
+      b.sumLab[1]/b.area,
+      b.sumLab[2]/b.area
+    ];
+    b.rMax=Math.max(b.rMax,a.rMax);
+    b.perimeter=b.perimeter+a.perimeter-2*shared;
+
+    for(const [cid,len] of a.neighbors){
+      if(cid===b.id)continue;
+      const c=comps[cid];
+      if(!c||!c.active)continue;
+      c.neighbors.delete(a.id);
+      const oldBC=b.neighbors.get(cid)||0;
+      b.neighbors.set(cid,oldBC+len);
+      c.neighbors.set(b.id,(c.neighbors.get(b.id)||0)+len);
+    }
+
+    b.neighbors.delete(a.id);
+    a.neighbors.clear();
+    a.active=false;
+    a.pixels=[];
+    mergedAny=true;
+  }
+
+  return mergedAny;
 }
 
 function makeRegions(){
-  const W=S.W,H=S.H,N=W*H;
-  const {map,comps}=components(S.labels,W,H);
+  const W=S.W,H=S.H;
+  const built=components(S.labels,W,H,null);
+  const map=built.map, comps=built.comps;
+  const dist=chamferDistance(map,W,H);
+
   const regions=comps.map(c=>({
-    id:c.id,color:c.label,pixels:c.pixels,area:c.area,filled:false,
-    minX:W,minY:H,maxX:0,maxY:0,labelX:0,labelY:0
+    id:c.id,
+    color:c.label,
+    pixels:c.pixels,
+    area:c.area,
+    filled:false,
+    labelX:0,labelY:0,labelRadius:0
   }));
 
-  for(const r of regions){
-    for(const i of r.pixels){
-      const x=i%W,y=(i/W)|0;
-      if(x<r.minX)r.minX=x;if(x>r.maxX)r.maxX=x;
-      if(y<r.minY)r.minY=y;if(y>r.maxY)r.maxY=y;
+  for(let i=0;i<map.length;i++){
+    const r=regions[map[i]];
+    const radius=dist[i]/10;
+    if(radius>r.labelRadius){
+      r.labelRadius=radius;
+      r.labelX=i%W;
+      r.labelY=(i/W)|0;
     }
-  }
-
-  // 全領域を同時に距離変換。境界から最も遠い点を番号位置にする。
-  const dist=new Uint16Array(N);
-  dist.fill(65535);
-  const queue=new Int32Array(N);
-  let head=0,tail=0;
-
-  for(let i=0;i<N;i++){
-    const rid=map[i],x=i%W;
-    let boundary=x===0||x===W-1||i<W||i>=N-W;
-    if(!boundary){
-      boundary=map[i-1]!==rid||map[i+1]!==rid||map[i-W]!==rid||map[i+W]!==rid;
-    }
-    if(boundary){dist[i]=0;queue[tail++]=i}
-  }
-
-  while(head<tail){
-    const i=queue[head++],rid=map[i],x=i%W,nd=dist[i]+1;
-    if(x>0)spread(i-1);
-    if(x<W-1)spread(i+1);
-    if(i>=W)spread(i-W);
-    if(i<N-W)spread(i+W);
-    function spread(n){
-      if(map[n]===rid&&dist[n]>nd){
-        dist[n]=nd;queue[tail++]=n;
-      }
-    }
-  }
-
-  for(const r of regions){
-    let best=r.pixels[0],bd=-1;
-    for(const i of r.pixels){
-      if(dist[i]>bd){bd=dist[i];best=i}
-    }
-    r.labelX=best%W;
-    r.labelY=(best/W)|0;
-    r.labelRadius=bd;
   }
 
   S.regionMap=map;
   S.regions=regions;
   S.total=regions.length;
-  raster.width=W;raster.height=H;
+  raster.width=W;
+  raster.height=H;
 }
 
 function compactPalette(){
   const used=[...new Set(S.regions.map(r=>r.color))].sort((a,b)=>a-b);
   const remap=new Map(used.map((v,i)=>[v,i]));
   S.palette=used.map(i=>S.palette[i]);
+  S.paletteLab=used.map(i=>S.paletteLab[i]);
   for(const r of S.regions)r.color=remap.get(r.color);
-  // S.labelsは描画色には使わずregionMap経由なので、ここでの再番号だけでよい。
 }
 
 function resetPuzzle(){
@@ -396,7 +590,10 @@ function resetPuzzle(){
 function colorFinished(c){
   let found=false;
   for(const r of S.regions){
-    if(r.color===c){found=true;if(!r.filled)return false}
+    if(r.color===c){
+      found=true;
+      if(!r.filled)return false;
+    }
   }
   return found;
 }
@@ -452,12 +649,12 @@ function draw(){
     if(r.filled){
       d[p]=c[0];d[p+1]=c[1];d[p+2]=c[2];
     }else{
-      d[p]=252;d[p+1]=250;d[p+2]=247;
+      d[p]=253;d[p+1]=252;d[p+2]=249;
     }
     d[p+3]=255;
   }
 
-  // 量子化された領域どうしの境界を線画として描く。
+  // 初版は「最終領域マップの境界」だけを線にする。
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
       const i=y*W+x,rid=S.regionMap[i];
@@ -466,26 +663,7 @@ function draw(){
       if(y<H-1&&S.regionMap[i+W]!==rid)edge=true;
       if(edge){
         const p=i*4;
-        d[p]=92;d[p+1]=82;d[p+2]=85;
-      }
-    }
-  }
-
-  // 元画像の濃いエッジを薄く重ね、顔や髪などの線を少し残す。
-  for(let y=1;y<H-1;y++){
-    for(let x=1;x<W-1;x++){
-      const i=y*W+x,p=i*4;
-      const lum=(q)=>{
-        const z=q*4;
-        return S.source[z]*.299+S.source[z+1]*.587+S.source[z+2]*.114;
-      };
-      const L=lum(i);
-      const grad=Math.max(
-        Math.abs(L-lum(i-1)),Math.abs(L-lum(i+1)),
-        Math.abs(L-lum(i-W)),Math.abs(L-lum(i+W))
-      );
-      if(L<118&&grad>24){
-        d[p]=82;d[p+1]=74;d[p+2]=77;
+        d[p]=92;d[p+1]=84;d[p+2]=86;
       }
     }
   }
@@ -503,24 +681,22 @@ function draw(){
 
 function drawNumbers(f){
   const sx=f.w/S.W,sy=f.h/S.H;
+  const scale=Math.min(sx,sy);
   ctx.textAlign='center';
   ctx.textBaseline='middle';
 
   for(const r of S.regions){
     if(r.filled)continue;
-    // 数字が読めない小領域は統合済みだが、念のため狭すぎる場所には表示しない。
-    const radius=r.labelRadius*Math.min(sx,sy);
-    if(radius<7*(devicePixelRatio||1))continue;
-
-    const fs=clamp(radius*.95,10*(devicePixelRatio||1),17*(devicePixelRatio||1));
+    const radius=r.labelRadius*scale;
+    const fs=clamp(radius*1.35,9*(devicePixelRatio||1),17*(devicePixelRatio||1));
     const x=f.x+(r.labelX+.5)*sx;
     const y=f.y+(r.labelY+.5)*sy;
-    ctx.font=`900 ${fs}px system-ui,sans-serif`;
-    ctx.lineWidth=Math.max(2,fs*.2);
-    ctx.strokeStyle='rgba(255,255,255,.95)';
-    ctx.fillStyle='#62565a';
-    ctx.strokeText(r.color+1,x,y);
-    ctx.fillText(r.color+1,x,y);
+    ctx.font='900 '+fs+'px system-ui,sans-serif';
+    ctx.lineWidth=Math.max(2,fs*.18);
+    ctx.strokeStyle='rgba(255,255,255,.98)';
+    ctx.fillStyle='#5c5356';
+    ctx.strokeText(String(r.color+1),x,y);
+    ctx.fillText(String(r.color+1),x,y);
   }
 }
 
@@ -557,9 +733,7 @@ function tap(ev){
   }
   renderPalette();
 
-  if(S.filledCount===S.total){
-    E.done.classList.add('show');
-  }
+  if(S.filledCount===S.total)E.done.classList.add('show');
 }
 
 E.canvas.addEventListener('pointerdown',tap);
@@ -571,8 +745,13 @@ E.upload.onchange=async()=>{
   S.imageUrl=URL.createObjectURL(file);
   await useSource(S.imageUrl);
 };
-E.resetBtn.onclick=()=>{if(S.regions.length){resetPuzzle();renderPalette()}};
-E.againBtn.onclick=()=>{resetPuzzle();renderPalette()};
+E.resetBtn.onclick=()=>{
+  if(S.regions.length){resetPuzzle();renderPalette()}
+};
+E.againBtn.onclick=()=>{
+  resetPuzzle();renderPalette();
+};
+
 new ResizeObserver(resize).observe(E.board);
 window.addEventListener('orientationchange',()=>setTimeout(resize,120));
 
