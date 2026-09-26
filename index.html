@@ -1,1 +1,58 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>のいちゃんのぬりえ</title></head><body><h1>のいちゃんのぬりえ</h1><p>GitHub → Vercel 接続テスト</p></body></html>
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#fff7f1">
+<title>のいちゃんのぬりえ</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main class="app">
+  <header class="top">
+    <button class="circle" id="homeBtn" aria-label="メニュー">⌂</button>
+    <div class="title">のいちゃんのぬりえ</div>
+    <button class="circle" id="resetBtn" aria-label="やりなおす">↻</button>
+  </header>
+  <div class="progressShell"><i class="progressBar" id="progressBar"></i></div>
+  <section class="stage" id="stage">
+    <canvas id="game" aria-label="数字ぬりえ"></canvas>
+    <div class="hint" id="hint">同じ数字をぬってね 🎨</div>
+    <div class="comboMeter" id="comboMeter"><i id="comboFill"></i></div>
+    <div class="comboText" id="comboText"></div>
+    <div class="cat" id="cat"><div class="catFace">ฅ^•ﻌ•^ฅ</div><div class="catSay">がんばるにゃ！</div></div>
+    <div class="finish" id="finish">
+      <div class="finishCard"><div class="finishStar">🌟</div><h2>できた！</h2><p>きれいにぬれたね</p><button class="big" id="againBtn">もういちど</button></div>
+    </div>
+  </section>
+  <footer class="paletteArea">
+    <div class="palette" id="palette" aria-label="色をえらぶ"></div>
+    <div class="controls" aria-label="むずかしさ">
+      <button class="pill active" data-difficulty="easy">かんたん</button>
+      <button class="pill" data-difficulty="normal">ふつう</button>
+      <button class="pill" data-difficulty="fine">こまかい</button>
+    </div>
+  </footer>
+  <div class="overlay off" id="menu">
+    <div class="panel">
+      <h2>ぬりえをえらぶ</h2>
+      <p>好きな画像を読み込むと、自動で数字ぬりえにします。</p>
+      <input class="fileInput" id="upload" type="file" accept="image/*">
+      <button class="big" id="uploadBtn">画像をえらぶ</button>
+      <div class="settingTitle">色の数</div>
+      <div class="chips">
+        <button class="chip" data-colors="4">4色</button>
+        <button class="chip active" data-colors="8">8色</button>
+        <button class="chip" data-colors="12">12色</button>
+        <button class="chip" data-colors="16">16色</button>
+      </div>
+      <button class="big sub" id="closeMenu">もどる</button>
+    </div>
+  </div>
+  <div class="loading" id="loading">
+    <div><div class="spinner"></div><div id="loadingText">ぬりえをつくっています…</div></div>
+  </div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
