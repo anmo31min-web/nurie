@@ -10,10 +10,12 @@ const E = {
   status: $('#status'),
   done: $('#done'),
   note: $('#note'),
+  noteText: $('#noteText'),
   upload: $('#upload'),
   uploadBtn: $('#uploadBtn'),
   resetBtn: $('#resetBtn'),
-  againBtn: $('#againBtn')
+  againBtn: $('#againBtn'),
+  detailToggle: $('#detailToggle')
 };
 
 const ctx = E.canvas.getContext('2d');
@@ -21,12 +23,22 @@ const work = document.createElement('canvas');
 const wctx = work.getContext('2d', {willReadFrequently:true});
 const raster = document.createElement('canvas');
 const rctx = raster.getContext('2d');
+// Bilateral filtering uses the same RGB-distance Gaussian as before, but the
+// 256^3 possible squared distances are reduced to a small integer LUT. This
+// keeps the hot loop free of Math.exp without changing its weighting.
+const COLOR_WEIGHT_LUT = (() => {
+  const lut = new Float32Array(195076);
+  const inv = 1 / (2 * 25 * 25);
+  for (let d = 0; d < lut.length; d++) lut[d] = Math.exp(-d * inv);
+  return lut;
+})();
 
 const S = {
   image:null,
   imageUrl:null,
   W:0,H:0,
   filtered:null,
+  detailCanvas:null,
   lab:null,
   labels:null,
   regionMap:null,
@@ -36,6 +48,8 @@ const S = {
   selected:0,
   filledCount:0,
   total:0,
+  hiddenLabels:0,
+  loadSerial:0,
   ready:false,
   fit:{x:0,y:0,w:1,h:1}
 };
@@ -60,19 +74,34 @@ function loadImage(src){
 }
 
 async function useSource(src){
+  const serial=++S.loadSerial;
   S.ready=false;
+  E.uploadBtn.disabled=true;
+  E.upload.disabled=true;
+  E.resetBtn.disabled=true;
+  E.againBtn.disabled=true;
   E.done.classList.remove('show');
   showStatus('画像を読み込んでいます…');
   try{
-    S.image=await loadImage(src);
-    await buildPuzzle();
+    const image=await loadImage(src);
+    if(serial!==S.loadSerial)return;
+    S.image=image;
+    await buildPuzzle(serial);
   }catch(err){
     console.error(err);
-    showStatus('画像を読み込めませんでした');
+    if(serial===S.loadSerial)showStatus('画像を読み込めませんでした');
+  } finally {
+    if(serial===S.loadSerial){
+      E.upload.disabled=false;
+      E.uploadBtn.disabled=false;
+      E.resetBtn.disabled=false;
+      E.againBtn.disabled=false;
+    }
   }
 }
 
-async function buildPuzzle(){
+async function buildPuzzle(serial=S.loadSerial){
+  if(serial!==S.loadSerial)return;
   const ar=S.image.naturalWidth/S.image.naturalHeight;
   const longSide=512;
   let W,H;
@@ -97,12 +126,16 @@ async function buildPuzzle(){
 
   showStatus('色ムラをならしています…');
   await tick();
+  if(serial!==S.loadSerial)return;
   const original=wctx.getImageData(0,0,W,H);
   const filtered=await bilateralFilter(original,W,H,2,25);
+  if(serial!==S.loadSerial)return;
   S.filtered=filtered.data;
+  S.detailCanvas=buildDetailOverlay(original,W,H);
 
   showStatus('8色にまとめています…');
   await tick();
+  if(serial!==S.loadSerial)return;
   S.lab=rgbDataToLab(S.filtered,W*H);
 
   const sampleIdx=randomSampleIndices(W*H,Math.min(10000,W*H),20260926);
@@ -142,24 +175,60 @@ async function buildPuzzle(){
 
   showStatus('小さな領域を整理しています…');
   await tick();
+  if(serial!==S.loadSerial)return;
 
   S.labels=labels;
   for(let pass=0;pass<3;pass++){
     const merged=mergeSmallRegionsSequential(S.labels,S.lab,S.paletteLab,W,H);
     if(!merged)break;
     await tick();
+    if(serial!==S.loadSerial)return;
   }
 
   showStatus('番号を置いています…');
   await tick();
+  if(serial!==S.loadSerial)return;
 
   makeRegions();
+  ensureLabelsFit();
   compactPalette();
+  // Digit boxes cover all eight palette numbers, so compaction preserves fit.
+  S.ready=true;
   resetPuzzle();
   renderPalette();
   resize();
-  S.ready=true;
   hideStatus();
+}
+
+function buildDetailOverlay(image,W,H){
+  const N=W*H,lum=new Float32Array(N),dilated=new Float32Array(N),closed=new Float32Array(N);
+  const src=image.data;
+  for(let i=0;i<N;i++)lum[i]=src[i*4]*.2126+src[i*4+1]*.7152+src[i*4+2]*.0722;
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    let v=0;
+    for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
+      const xx=clamp(x+dx,0,W-1),yy=clamp(y+dy,0,H-1);
+      v=Math.max(v,lum[yy*W+xx]);
+    }
+    dilated[y*W+x]=v;
+  }
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    let v=255;
+    for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
+      const xx=clamp(x+dx,0,W-1),yy=clamp(y+dy,0,H-1);
+      v=Math.min(v,dilated[yy*W+xx]);
+    }
+    closed[y*W+x]=v;
+  }
+  const c=document.createElement('canvas'); c.width=W;c.height=H;
+  const cctx=c.getContext('2d'),out=cctx.createImageData(W,H);
+  for(let i=0;i<N;i++){
+    const darkness=Math.min(1,Math.max(0,(205-lum[i])/55));
+    const alpha=Math.min(.68,Math.max(0,(closed[i]-lum[i]-8)/65))*darkness;
+    const p=i*4; out.data[p]=75;out.data[p+1]=56;out.data[p+2]=50;out.data[p+3]=alpha*255;
+  }
+  cctx.putImageData(out,0,0);
+  return c;
 }
 
 async function bilateralFilter(image,W,H,radius,sigmaColor){
@@ -168,7 +237,7 @@ async function bilateralFilter(image,W,H,radius,sigmaColor){
   const dst=out.data;
   const sigmaSpace=2;
   const invSpace=1/(2*sigmaSpace*sigmaSpace);
-  const invColor=1/(2*sigmaColor*sigmaColor);
+  const weights=sigmaColor===25 ? COLOR_WEIGHT_LUT : Float32Array.from(COLOR_WEIGHT_LUT,(_,d)=>Math.exp(-d/(2*sigmaColor*sigmaColor)));
   const kernel=[];
 
   for(let dy=-radius;dy<=radius;dy++){
@@ -192,7 +261,7 @@ async function bilateralFilter(image,W,H,radius,sigmaColor){
         const yy=clamp(y+q.dy,0,H-1);
         const p=(yy*W+xx)*4;
         const dr=src[p]-cr,dg=src[p+1]-cg,db=src[p+2]-cb;
-        const wc=Math.exp(-(dr*dr+dg*dg+db*db)*invColor);
+        const wc=weights[dr*dr+dg*dg+db*db];
         const w=q.ws*wc;
         sr+=src[p]*w;
         sg+=src[p+1]*w;
@@ -570,9 +639,121 @@ function makeRegions(){
   raster.height=H;
 }
 
+// Label placement and drawing intentionally share this image-coordinate font
+// recipe. The canvas is later scaled for CSS pixels/DPR, so testing in image
+// coordinates makes the result stable across resize and retina displays.
+const labelMeasureCtx=document.createElement('canvas').getContext('2d');
+labelMeasureCtx.textAlign='center';
+labelMeasureCtx.textBaseline='middle';
+const labelSpecs=new Map();
+function labelSpec(region){
+  const fontSize=region.labelFontSize||9;
+  if(labelSpecs.has(fontSize))return labelSpecs.get(fontSize);
+  const font=`900 ${fontSize}px system-ui,sans-serif`;
+  labelMeasureCtx.font=font;
+  const stroke=Math.max(2,fontSize*.18),pad=1;
+  let left=0,right=0,top=0,bottom=0;
+  // A common box for digits 1..8 remains valid when unused colors are removed.
+  for(let digit=1;digit<=8;digit++){
+    const m=labelMeasureCtx.measureText(String(digit));
+    left=Math.max(left,m.actualBoundingBoxLeft);
+    right=Math.max(right,m.actualBoundingBoxRight);
+    top=Math.max(top,m.actualBoundingBoxAscent);
+    bottom=Math.max(bottom,m.actualBoundingBoxDescent);
+  }
+  const spec={fontSize,font,stroke,left:left+stroke/2+pad,right:right+stroke/2+pad,
+    top:top+stroke/2+pad,bottom:bottom+stroke/2+pad};
+  labelSpecs.set(fontSize,spec);
+  return spec;
+}
+
+function regionLabelFitsAt(region,x,y,spec){
+  const left=Math.floor(x+.5-spec.left),right=Math.ceil(x+.5+spec.right)-1;
+  const top=Math.floor(y+.5-spec.top),bottom=Math.ceil(y+.5+spec.bottom)-1;
+  if(left<0||top<0||right>=S.W||bottom>=S.H)return false;
+  for(let yy=top;yy<=bottom;yy++)for(let xx=left;xx<=right;xx++){
+    if(S.regionMap[yy*S.W+xx]!==region.id)return false;
+  }
+  return true;
+}
+
+function findLabelPlacement(region){
+  region.labelFontSize=9;
+  const spec=labelSpec(region);
+  let found=regionLabelFitsAt(region,region.labelX,region.labelY,spec);
+  if(!found){
+    for(const p of region.pixels){
+      const x=p%S.W,y=(p/S.W)|0;
+      if(regionLabelFitsAt(region,x,y,spec)){
+        region.labelX=x;region.labelY=y;found=true;break;
+      }
+    }
+  }
+  if(!found)return false;
+  // Grow only after the smallest label fits; this never forces extra merges.
+  for(let size=10;size<=17;size++){
+    region.labelFontSize=size;
+    if(!regionLabelFitsAt(region,region.labelX,region.labelY,labelSpec(region))){
+      region.labelFontSize=size-1;break;
+    }
+  }
+  return true;
+}
+
+function mergeRegionForLabel(region, neighbor){
+  for(const p of region.pixels) S.labels[p]=neighbor.label;
+  // Rebuilding components after every merge avoids stale adjacency, radius,
+  // and color connectivity state when several tiny regions touch.
+}
+
+function ensureLabelsFit(){
+  const maxPasses=Math.max(1,S.W*S.H);
+  for(let pass=0;pass<maxPasses;pass++){
+    makeRegions();
+    const invalid=S.regions.find(r=>!findLabelPlacement(r));
+    if(!invalid)break;
+    const built=components(S.labels,S.W,S.H,S.lab);
+    buildAdjacency(built.map,built.comps,S.W,S.H);
+    const source=built.comps[invalid.id];
+    let best=null,bestScore=Infinity;
+    if(source){
+      for(const [id,shared] of source.neighbors){
+        const candidate=built.comps[id];
+        if(!candidate)continue;
+        const colorGap=Math.sqrt(deltaE2(source.meanLab,S.paletteLab[candidate.label]));
+        const score=colorGap/18+(1-shared/Math.max(1,source.perimeter))*2;
+        if(score<bestScore){bestScore=score;best=candidate;}
+      }
+    }
+    if(!best){
+      invalid.labelVisible=false;
+      invalid.noNumberReason='領域が小さすぎるため番号なし';
+      break;
+    }
+    const beforeCount=S.regions.length;
+    mergeRegionForLabel(source,best);
+    makeRegions();
+    if(S.regions.length>=beforeCount){
+      const stuck=S.regions.find(r=>r.id===invalid.id)||invalid;
+      stuck.labelVisible=false;
+      break;
+    }
+  }
+  makeRegions();
+  S.hiddenLabels=0;
+  for(const region of S.regions){
+    region.labelVisible=findLabelPlacement(region);
+    if(!region.labelVisible){
+      region.noNumberReason='領域が小さすぎるため番号なし';
+      S.hiddenLabels++;
+    }
+  }
+}
+
 function compactPalette(){
   const used=[...new Set(S.regions.map(r=>r.color))].sort((a,b)=>a-b);
   const remap=new Map(used.map((v,i)=>[v,i]));
+  for(let i=0;i<S.labels.length;i++)S.labels[i]=remap.get(S.labels[i]);
   S.palette=used.map(i=>S.palette[i]);
   S.paletteLab=used.map(i=>S.paletteLab[i]);
   for(const r of S.regions)r.color=remap.get(r.color);
@@ -616,6 +797,10 @@ function renderPalette(){
     };
     E.palette.appendChild(b);
   });
+  const noteText=S.hiddenLabels
+    ? `数字と同じ色を選んで、領域をタップ（小さな${S.hiddenLabels}領域は番号なし）`
+    : '数字と同じ色を選んで、領域をタップ';
+  if(E.noteText)E.noteText.textContent=noteText;
 }
 
 function updateProgress(){
@@ -639,7 +824,7 @@ function fit(){
 }
 
 function draw(){
-  if(!S.regionMap||!S.regions.length)return;
+  if(!S.ready||!S.regionMap||!S.regions.length)return;
   const W=S.W,H=S.H,N=W*H;
   const image=rctx.createImageData(W,H),d=image.data;
 
@@ -676,6 +861,7 @@ function draw(){
   ctx.imageSmoothingEnabled=true;
   ctx.imageSmoothingQuality='high';
   ctx.drawImage(raster,f.x,f.y,f.w,f.h);
+  if(E.detailToggle?.checked&&S.detailCanvas)ctx.drawImage(S.detailCanvas,f.x,f.y,f.w,f.h);
   drawNumbers(f);
 }
 
@@ -686,13 +872,13 @@ function drawNumbers(f){
   ctx.textBaseline='middle';
 
   for(const r of S.regions){
-    if(r.filled)continue;
-    const radius=r.labelRadius*scale;
-    const fs=clamp(radius*1.35,9*(devicePixelRatio||1),17*(devicePixelRatio||1));
+    if(r.filled||r.labelVisible===false)continue;
+    const spec=labelSpec(r);
+    const fs=spec.fontSize*scale;
     const x=f.x+(r.labelX+.5)*sx;
     const y=f.y+(r.labelY+.5)*sy;
     ctx.font='900 '+fs+'px system-ui,sans-serif';
-    ctx.lineWidth=Math.max(2,fs*.18);
+    ctx.lineWidth=Math.max(2*scale,fs*.18);
     ctx.strokeStyle='rgba(255,255,255,.98)';
     ctx.fillStyle='#5c5356';
     ctx.strokeText(String(r.color+1),x,y);
@@ -751,9 +937,10 @@ E.resetBtn.onclick=()=>{
 E.againBtn.onclick=()=>{
   resetPuzzle();renderPalette();
 };
+E.detailToggle?.addEventListener('change',draw);
 
 new ResizeObserver(resize).observe(E.board);
 window.addEventListener('orientationchange',()=>setTimeout(resize,120));
 
-useSource('demo.svg');
+useSource('demo.png');
 })();

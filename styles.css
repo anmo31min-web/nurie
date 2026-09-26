@@ -21,6 +21,8 @@ footer{flex:none;padding:9px 10px max(12px,env(safe-area-inset-bottom))}
 .swatch.selected{outline:3px solid #66545a;transform:translateY(-3px)}
 .swatch.finished{opacity:.42}
 .note{text-align:center;font-size:11px;color:#917d82;margin-top:8px}
+.detailToggle{display:inline-flex;align-items:center;gap:3px;margin-left:6px;color:#806d72;cursor:pointer}
+.detailToggle input{accent-color:var(--accent);margin:0}
 .done{position:absolute;inset:0;display:none;place-items:center;background:#fffaf4d9;backdrop-filter:blur(2px)}
 .done.show{display:grid}
 .doneCard{min-width:210px;text-align:center;background:#fff;border:1px solid #eadfdb;border-radius:22px;padding:24px;box-shadow:0 10px 28px #65465020}

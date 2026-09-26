@@ -15,8 +15,8 @@
       <p>8色の数字ぬりえ</p>
     </div>
     <div class="topActions">
-      <button class="smallBtn" id="uploadBtn">画像</button>
-      <button class="smallBtn" id="resetBtn">↻</button>
+      <button class="smallBtn" id="uploadBtn" type="button">画像</button>
+      <button class="smallBtn" id="resetBtn" type="button" aria-label="ぬりえをリセット">↻</button>
     </div>
   </header>
 
@@ -24,19 +24,19 @@
 
   <section class="board" id="board">
     <canvas id="game" aria-label="数字ぬりえ"></canvas>
-    <div class="status" id="status">画像を数字ぬりえに変換しています…</div>
+    <div class="status" id="status" role="status" aria-live="polite">画像を数字ぬりえに変換しています…</div>
     <div class="done" id="done">
       <div class="doneCard">
         <div class="doneMark">✓</div>
         <strong>完成！</strong>
-        <button id="againBtn">もういちど</button>
+        <button id="againBtn" type="button">もういちど</button>
       </div>
     </div>
   </section>
 
   <footer>
     <div class="palette" id="palette" aria-label="色を選ぶ"></div>
-    <div class="note" id="note">数字と同じ色を選んで、領域をタップ</div>
+    <div class="note" id="note"><span id="noteText">数字と同じ色を選んで、領域をタップ</span><label class="detailToggle"><input id="detailToggle" type="checkbox" checked> 細い線を表示（模様）</label></div>
   </footer>
 
   <input id="upload" type="file" accept="image/*" hidden>
