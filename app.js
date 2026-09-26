@@ -45,7 +45,7 @@ function regions(di){
   for(let p of c.p){let o=Math.max(0,own[p]),r=rs[base+o],x=p%W,y=(p/W)|0;rm[p]=r.id;r.p.push(p);r.area++;r.sx+=x;r.sy+=y;r.minX=Math.min(r.minX,x);r.maxX=Math.max(r.maxX,x);r.minY=Math.min(r.minY,y);r.maxY=Math.max(r.maxY,y)}
  }
  for(let r of rs){let cx=r.sx/r.area,cy=r.sy/r.area,b=r.p[0],bd=Infinity,stride=Math.max(1,Math.floor(r.p.length/900));for(let z=0;z<r.p.length;z+=stride){let p=r.p[z],x=p%W,y=(p/W)|0,d=(x-cx)**2+(y-cy)**2;if(d<bd){bd=d;b=p}}r.lx=b%W;r.ly=(b/W)|0}
- S.map=rm;S.regions=rs;S.total=rs.length;paint.width=W;paint.height=H
+ let used=[...new Set(rs.map(r=>r.color))].sort((a,b)=>a-b),cr=new Map(used.map((v,i)=>[v,i]));S.palette=used.map(i=>S.palette[i]);for(let r of rs)r.color=cr.get(r.color);S.map=rm;S.regions=rs;S.total=rs.length;paint.width=W;paint.height=H
 }
 function reset(repal=true){for(let r of S.regions)r.filled=false;S.filled=0;S.combo=0;S.comboEnd=0;S.catDone=false;S.spark=null;S.complete=0;E.finish.classList.remove('show');E.combo.classList.remove('on');E.meter.classList.remove('on');S.selected=first();progress();if(repal)palette();draw()}
 function first(){for(let c=0;c<S.palette.length;c++)if(S.regions.some(r=>r.color===c&&!r.filled))return c;return 0}
@@ -58,7 +58,7 @@ function fit(){let cw=E.c.width,ch=E.c.height,ar=S.W/S.H,w=cw,h=w/ar;if(h>ch){h=
 function draw(){
  if(!S.map||!S.img)return;let W=S.W,H=S.H,N=W*H,o=pctx.createImageData(W,H),d=o.data;
  for(let i=0;i<N;i++){let p=i*4,rid=S.map[i];if(S.outline[i]){d[p]=S.src[p];d[p+1]=S.src[p+1];d[p+2]=S.src[p+2];d[p+3]=255;continue}if(rid<0){d[p]=255;d[p+1]=250;d[p+2]=246;d[p+3]=255;continue}let r=S.regions[rid],c=S.palette[r.color],t=r.filled?0:.86;d[p]=mix(c[0],255,t);d[p+1]=mix(c[1],252,t);d[p+2]=mix(c[2],249,t);d[p+3]=255}
- for(let y=0;y<H;y++)for(let x=0;x<W;x++){let i=y*W+x,rid=S.map[i];if(rid<0||S.outline[i])continue;let r=S.regions[rid],ed=false;if(x<W-1){let n=S.map[i+1];if(n>=0&&n!==rid&&!(r.filled&&S.regions[n].filled))ed=true}if(y<H-1){let n=S.map[i+W];if(n>=0&&n!==rid&&!(r.filled&&S.regions[n].filled))ed=true}if(ed){let p=i*4,c=S.palette[r.color];d[p]=mix(c[0],110,.35);d[p+1]=mix(c[1],110,.35);d[p+2]=mix(c[2],110,.35)}}
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++){let i=y*W+x,rid=S.map[i];if(rid<0||S.outline[i])continue;let r=S.regions[rid];if(r.filled)continue;let ed=false;if(x<W-1){let n=S.map[i+1];if(n>=0&&n!==rid)ed=true}if(y<H-1){let n=S.map[i+W];if(n>=0&&n!==rid&&!(r.filled&&S.regions[n].filled))ed=true}if(ed){let p=i*4,c=S.palette[r.color];d[p]=mix(c[0],110,.35);d[p+1]=mix(c[1],110,.35);d[p+2]=mix(c[2],110,.35)}}
  pctx.putImageData(o,0,0);let f=fit();ctx.clearRect(0,0,E.c.width,E.c.height);ctx.fillStyle='#fffaf5';ctx.fillRect(0,0,E.c.width,E.c.height);ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';ctx.drawImage(paint,f.x,f.y,f.w,f.h);
  let blend=0;if(S.complete){blend=clamp((performance.now()-S.complete)/650,0,1);if(blend){ctx.globalAlpha=blend;ctx.drawImage(S.img,f.x,f.y,f.w,f.h);ctx.globalAlpha=1}}
  if(blend<.8)numbers(f);if(S.spark)spark(f)
