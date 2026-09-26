@@ -89,7 +89,7 @@ function snapshotPuzzle(){
 function restorePuzzle(snapshot){
   const serial=S.loadSerial;
   Object.assign(S,snapshot,{view:{...snapshot.view},loadSerial:serial});
-  E.done.classList.toggle('show',!!snapshot.doneVisible);
+  setCompleted(!!snapshot.doneVisible);
   if(E.noteText)E.noteText.textContent=snapshot.noteText;
   if(S.W&&S.H){raster.width=S.W;raster.height=S.H;}
   if(S.regions.length){renderPalette();resize();draw();}
@@ -108,7 +108,7 @@ async function useSource(src,ownedUrl=null){
   E.againBtn.disabled=true;
   if(E.detailToggle)E.detailToggle.disabled=true;
   [E.zoomIn,E.zoomOut,E.zoomReset].forEach(b=>{if(b)b.disabled=true;});
-  E.done.classList.remove('show');
+  setCompleted(false);
   showStatus('画像を読み込んでいます…');
   try{
     const image=await loadImage(src);
@@ -179,7 +179,7 @@ async function buildPuzzle(serial=S.loadSerial){
   S.filtered=filtered.data;
   S.detailCanvas=buildDetailOverlay(original,W,H);
 
-  showStatus('8色にまとめています…');
+  showStatus('20色にまとめています…');
   await tick();
   if(serial!==S.loadSerial)return;
   S.lab=rgbDataToLab(S.filtered,W*H);
@@ -191,7 +191,7 @@ async function buildPuzzle(serial=S.loadSerial){
     S.lab[i*3+2]
   ]);
 
-  let centers=kmeansPlusPlus(samples,8,20260926);
+  let centers=kmeansPlusPlus(samples,20,20260926);
   centers=lloyd(samples,centers,20);
   if(!centers.length) throw new Error('palette generation failed');
 
@@ -238,7 +238,9 @@ async function buildPuzzle(serial=S.loadSerial){
   makeRegions();
   ensureLabelsFit();
   compactPalette();
-  // Digit boxes cover all eight palette numbers, so compaction preserves fit.
+  // Compaction may change a number's width; remeasure the final labels.
+  S.hiddenLabels=0;
+  for(const r of S.regions){r.labelVisible=findLabelPlacement(r);if(!r.labelVisible)S.hiddenLabels++;}
   S.view={zoom:1,panX:0,panY:0};
   S.ready=true;
   resetPuzzle();
@@ -566,10 +568,17 @@ function mergeSmallRegionsSequential(labels,lab,paletteLab,W,H){
   const minArea=Math.max(18,Math.round(64*scale*scale));
   const minRadius=Math.max(2.4,5*scale);
   const order=comps.slice().sort((a,b)=>a.area-b.area);
+  // Keep the widest connected patch of every color: otherwise increasing
+  // the palette can paradoxically erase more colors during cleanup.
+  const representatives=new Map();
+  for(const c of comps){
+    if(!representatives.has(c.label)||representatives.get(c.label).rMax<c.rMax||(representatives.get(c.label).rMax===c.rMax&&representatives.get(c.label).area<c.area))representatives.set(c.label,c);
+  }
   let mergedAny=false;
 
   for(const a of order){
     if(!a.active)continue;
+    if(representatives.get(a.label)===a)continue;
     const tooSmall=a.area<minArea;
     const tooThin=a.rMax<minRadius;
     if(!tooSmall&&!tooThin)continue;
@@ -668,13 +677,14 @@ labelMeasureCtx.textBaseline='middle';
 const labelSpecs=new Map();
 function labelSpec(region){
   const fontSize=region.labelFontSize||9;
-  if(labelSpecs.has(fontSize))return labelSpecs.get(fontSize);
+  const key=fontSize+':'+region.color;
+  if(labelSpecs.has(key))return labelSpecs.get(key);
   const font=`900 ${fontSize}px system-ui,sans-serif`;
   labelMeasureCtx.font=font;
-  const stroke=Math.max(2,fontSize*.18),pad=1;
+  const stroke=fontSize<9?1:Math.max(2,fontSize*.18),pad=fontSize<9?.25:1;
   let left=0,right=0,top=0,bottom=0;
-  // A common box for digits 1..8 remains valid when unused colors are removed.
-  for(let digit=1;digit<=8;digit++){
+  // Measure the actual one- or two-digit number, preserving narrow details.
+  for(const digit of [region.color+1]){
     const m=labelMeasureCtx.measureText(String(digit));
     left=Math.max(left,m.actualBoundingBoxLeft);
     right=Math.max(right,m.actualBoundingBoxRight);
@@ -683,7 +693,7 @@ function labelSpec(region){
   }
   const spec={fontSize,font,stroke,left:left+stroke/2+pad,right:right+stroke/2+pad,
     top:top+stroke/2+pad,bottom:bottom+stroke/2+pad};
-  labelSpecs.set(fontSize,spec);
+  labelSpecs.set(key,spec);
   return spec;
 }
 
@@ -709,7 +719,20 @@ function findLabelPlacement(region){
       }
     }
   }
-  if(!found)return false;
+  if(!found){
+    // Preserve small details with compact numbers that can be read on zoom.
+    for(let size=8;size>=4&&!found;size--){
+      region.labelFontSize=size;
+      const smallSpec=labelSpec(region);
+      for(const p of region.pixels){
+        const x=p%S.W,y=(p/S.W)|0;
+        if(regionLabelFitsAt(region,x,y,smallSpec)){
+          region.labelX=x;region.labelY=y;found=true;break;
+        }
+      }
+    }
+    return found;
+  }
   // Grow only after the smallest label fits; this never forces extra merges.
   for(let size=10;size<=17;size++){
     region.labelFontSize=size;
@@ -730,7 +753,9 @@ function ensureLabelsFit(){
   const maxPasses=Math.max(1,S.W*S.H);
   for(let pass=0;pass<maxPasses;pass++){
     makeRegions();
-    const invalid=S.regions.find(r=>!findLabelPlacement(r));
+    const counts=new Map();
+    for(const r of S.regions)counts.set(r.color,(counts.get(r.color)||0)+1);
+    const invalid=S.regions.find(r=>!findLabelPlacement(r)&&counts.get(r.color)>1);
     if(!invalid)break;
     const built=components(S.labels,S.W,S.H,S.lab);
     buildAdjacency(built.map,built.comps,S.W,S.H);
@@ -783,7 +808,7 @@ function resetPuzzle(){
   for(const r of S.regions)r.filled=false;
   S.filledCount=0;
   S.selected=0;
-  E.done.classList.remove('show');
+  setCompleted(false);
   updateProgress();
   draw();
 }
@@ -819,9 +844,11 @@ function renderPalette(){
     };
     E.palette.appendChild(b);
   });
+  const active=E.palette.children[S.selected];
+  if(active)E.palette.scrollLeft=active.offsetLeft-E.palette.offsetLeft-(E.palette.clientWidth-active.offsetWidth)/2;
   const noteText=S.hiddenLabels
-    ? `数字と同じ色を選んで、領域をタップ（小さな${S.hiddenLabels}領域は番号なし）`
-    : '数字と同じ色を選んで、領域をタップ';
+    ? `同じ番号を塗り終えると元絵に。極細の${S.hiddenLabels}領域は2倍以上に拡大すると番号を表示`
+    : '同じ番号をすべて塗ると、元絵の色と質感が戻ります';
   if(E.noteText)E.noteText.textContent=noteText;
 }
 
@@ -865,15 +892,24 @@ function setZoom(next,cx=E.canvas.width/2,cy=E.canvas.height/2){
 
 function resetView(){S.view={zoom:1,panX:0,panY:0};draw();}
 
+function setCompleted(completed){
+  E.done.classList.toggle('show',completed);
+  document.querySelector('.app').classList.toggle('completed',completed);
+  E.done.querySelector('details').open=false;
+}
+
 function draw(){
   if(!S.ready||!S.regionMap||!S.regions.length)return;
   const W=S.W,H=S.H,N=W*H;
   const image=rctx.createImageData(W,H),d=image.data;
+  const revealed=S.palette.map((_,color)=>colorFinished(color));
 
   for(let i=0;i<N;i++){
     const rid=S.regionMap[i],r=S.regions[rid],p=i*4;
-    const c=S.palette[r.color];
     if(r.filled){
+      // Completing a number reveals its original colors and texture together.
+      if(revealed[r.color])continue;
+      const c=S.palette[r.color];
       d[p]=c[0];d[p+1]=c[1];d[p+2]=c[2];
     }else{
       const active=r.color===S.selected;
@@ -889,29 +925,36 @@ function draw(){
     d[p+3]=255;
   }
 
-  // 初版は「最終領域マップの境界」だけを線にする。
+  // Retain guides only while at least one side still needs painting.
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
       const i=y*W+x,rid=S.regionMap[i];
       let edge=false;
-      if(x<W-1&&S.regionMap[i+1]!==rid)edge=true;
-      if(y<H-1&&S.regionMap[i+W]!==rid)edge=true;
+      if(x<W-1&&S.regionMap[i+1]!==rid&&(!S.regions[rid].filled||!S.regions[S.regionMap[i+1]].filled))edge=true;
+      if(y<H-1&&S.regionMap[i+W]!==rid&&(!S.regions[rid].filled||!S.regions[S.regionMap[i+W]].filled))edge=true;
       if(edge){
         const p=i*4;
         d[p]=92;d[p+1]=84;d[p+2]=86;
+        d[p+3]=255;
       }
     }
   }
 
   rctx.putImageData(image,0,0);
+  // Decorative guides belong to unpainted paper, not to the original art.
+  if(E.detailToggle?.checked&&S.detailCanvas){
+    rctx.globalCompositeOperation='source-atop';
+    rctx.drawImage(S.detailCanvas,0,0);
+    rctx.globalCompositeOperation='source-over';
+  }
   const f=fit();
   ctx.clearRect(0,0,E.canvas.width,E.canvas.height);
   ctx.fillStyle='#fff';
   ctx.fillRect(0,0,E.canvas.width,E.canvas.height);
   ctx.imageSmoothingEnabled=true;
   ctx.imageSmoothingQuality='high';
-  ctx.drawImage(raster,f.x,f.y,f.w,f.h);
-  if(E.detailToggle?.checked&&S.detailCanvas)ctx.drawImage(S.detailCanvas,f.x,f.y,f.w,f.h);
+  ctx.drawImage(S.image,f.x,f.y,f.w,f.h);
+  if(S.filledCount<S.total)ctx.drawImage(raster,f.x,f.y,f.w,f.h);
   drawNumbers(f);
 }
 
@@ -922,13 +965,15 @@ function drawNumbers(f){
   ctx.textBaseline='middle';
 
   for(const r of S.regions){
-    if(r.filled||r.labelVisible===false)continue;
-    const spec=labelSpec(r);
+    if(r.filled||(r.labelVisible===false&&S.view.zoom<2))continue;
+    // A zoom-only marker may cross a very thin region's edge; keeping it out
+    // of the overview avoids covering the illustration with oversized labels.
+    const spec=labelSpec(r.labelVisible===false?{...r,labelFontSize:6}:r);
     const fs=spec.fontSize*scale;
     const x=f.x+(r.labelX+.5)*sx;
     const y=f.y+(r.labelY+.5)*sy;
     ctx.font='900 '+fs+'px system-ui,sans-serif';
-    ctx.lineWidth=Math.max(2*scale,fs*.18);
+    ctx.lineWidth=spec.stroke*scale;
     ctx.strokeStyle='rgba(255,255,255,.98)';
     ctx.fillStyle='#5c5356';
     ctx.strokeText(String(r.color+1),x,y);
@@ -970,7 +1015,7 @@ function tap(ev){
   renderPalette();
   draw();
 
-  if(S.filledCount===S.total)E.done.classList.add('show');
+  if(S.filledCount===S.total){setCompleted(true);resetView();}
 }
 
 const pointers=new Map();
@@ -1016,6 +1061,20 @@ E.resetBtn.onclick=()=>{
 };
 E.againBtn.onclick=()=>{
   if(S.ready){resetPuzzle();renderPalette();}
+};
+$('#saveBtn').onclick=()=>{
+  if(!S.ready||S.filledCount!==S.total)return;
+  const output=document.createElement('canvas');
+  output.width=S.image.naturalWidth;output.height=S.image.naturalHeight;
+  const out=output.getContext('2d');
+  out.fillStyle='#fff';out.fillRect(0,0,output.width,output.height);
+  out.drawImage(S.image,0,0);
+  output.toBlob(blob=>{
+    if(!blob)return;
+    const url=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=url;a.download='nurie-complete.png';a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
+  },'image/png');
 };
 E.detailToggle?.addEventListener('change',draw);
 E.zoomIn?.addEventListener('click',()=>{if(S.ready)setZoom(S.view.zoom*1.35);});

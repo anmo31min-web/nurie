@@ -24,12 +24,6 @@ footer{flex:none;padding:9px 10px max(12px,env(safe-area-inset-bottom))}
 .viewControls{display:flex;justify-content:center;gap:7px;margin-top:7px}.viewControls .smallBtn{height:32px;min-width:42px;padding:0 9px}
 .detailToggle{display:inline-flex;align-items:center;gap:3px;margin-left:6px;color:#806d72;cursor:pointer}
 .detailToggle input{accent-color:var(--accent);margin:0}
-.done{position:absolute;inset:0;display:none;place-items:center;background:#fffaf4d9;backdrop-filter:blur(2px)}
-.done.show{display:grid}
-.doneCard{min-width:210px;text-align:center;background:#fff;border:1px solid #eadfdb;border-radius:22px;padding:24px;box-shadow:0 10px 28px #65465020}
-.doneMark{width:50px;height:50px;border-radius:50%;display:grid;place-items:center;margin:0 auto 10px;background:#e88aa0;color:#fff;font-size:29px;font-weight:1000}
-.doneCard strong{display:block;font-size:24px;margin-bottom:14px}
-.doneCard button{border:0;border-radius:13px;background:#e58aa1;color:#fff;font-weight:900;padding:11px 18px}
 @media(max-height:650px){.top{padding-top:8px;padding-bottom:6px}.top h1{font-size:16px}.top p{display:none}.swatch{width:43px;height:43px}}
 
 .status.error{top:10px;translate:-50% 0;max-width:calc(100% - 20px);white-space:normal;text-align:center;font-weight:500}
@@ -43,3 +37,17 @@ footer{flex:none;padding:9px 10px max(12px,env(safe-area-inset-bottom))}
   .palette{gap:7px}.swatch{width:43px;height:43px}
   .note{font-size:10px;line-height:1.6}.detailToggle{margin:4px 0 0}
 }
+
+/* Completion is a quiet caption outside the artwork, never an overlay. */
+.done{display:none;align-items:center;justify-content:space-between;gap:12px;color:#947481;font-size:13px;padding:2px 6px}
+.done.show{display:flex}
+.done details{font-size:12px;text-align:right}
+.done summary{cursor:pointer;padding:8px;border-radius:8px}
+.finishActions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-top:6px}
+.completed .top,.completed .progress,.completed footer>.palette,.completed footer>.note,.completed footer>.viewControls{display:none}
+.completed .board{margin-top:12px;border:0;border-radius:4px;box-shadow:none}
+@media(orientation:landscape) and (max-height:600px){
+  .app.completed{display:flex;width:min(100%,960px)}
+  .completed footer{padding:4px 12px}
+  .completed .board{margin-bottom:0}
+}.palette{flex-wrap:nowrap;justify-content:flex-start;overflow-x:auto;padding:4px 3px 8px;scrollbar-width:thin}.swatch{flex:0 0 48px}@media(orientation:landscape) and (max-height:600px){.palette{flex-wrap:wrap;overflow-x:visible;justify-content:center}.swatch{flex-basis:43px}}
