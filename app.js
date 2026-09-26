@@ -15,7 +15,8 @@ const E = {
   uploadBtn: $('#uploadBtn'),
   resetBtn: $('#resetBtn'),
   againBtn: $('#againBtn'),
-  detailToggle: $('#detailToggle')
+  detailToggle: $('#detailToggle'),
+  zoomIn: $('#zoomIn'), zoomOut: $('#zoomOut'), zoomReset: $('#zoomReset')
 };
 
 const ctx = E.canvas.getContext('2d');
@@ -51,7 +52,8 @@ const S = {
   hiddenLabels:0,
   loadSerial:0,
   ready:false,
-  fit:{x:0,y:0,w:1,h:1}
+  fit:{x:0,y:0,w:1,h:1},
+  view:{zoom:1,panX:0,panY:0}
 };
 
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
@@ -59,6 +61,7 @@ const rgb=c=>'rgb('+c[0]+','+c[1]+','+c[2]+')';
 const tick=()=>new Promise(r=>requestAnimationFrame(r));
 
 function showStatus(text){
+  E.status.classList.remove('error');
   E.status.textContent=text;
   E.status.classList.remove('hide');
 }
@@ -73,13 +76,38 @@ function loadImage(src){
   });
 }
 
-async function useSource(src){
+function snapshotPuzzle(){
+  return {
+    ...S,
+    regions:S.regions.map(r=>({...r,pixels:r.pixels})),
+    view:{...S.view},
+    doneVisible:E.done.classList.contains('show'),
+    noteText:E.noteText?.textContent||''
+  };
+}
+
+function restorePuzzle(snapshot){
+  const serial=S.loadSerial;
+  Object.assign(S,snapshot,{view:{...snapshot.view},loadSerial:serial});
+  E.done.classList.toggle('show',!!snapshot.doneVisible);
+  if(E.noteText)E.noteText.textContent=snapshot.noteText;
+  if(S.W&&S.H){raster.width=S.W;raster.height=S.H;}
+  if(S.regions.length){renderPalette();resize();draw();}
+}
+
+let lastGoodPuzzle=null;
+async function useSource(src,ownedUrl=null){
   const serial=++S.loadSerial;
+  if(S.ready)lastGoodPuzzle=snapshotPuzzle();
+  const previous=lastGoodPuzzle;
+  pointers.clear();
   S.ready=false;
   E.uploadBtn.disabled=true;
   E.upload.disabled=true;
   E.resetBtn.disabled=true;
   E.againBtn.disabled=true;
+  if(E.detailToggle)E.detailToggle.disabled=true;
+  [E.zoomIn,E.zoomOut,E.zoomReset].forEach(b=>{if(b)b.disabled=true;});
   E.done.classList.remove('show');
   showStatus('画像を読み込んでいます…');
   try{
@@ -87,15 +115,33 @@ async function useSource(src){
     if(serial!==S.loadSerial)return;
     S.image=image;
     await buildPuzzle(serial);
+    if(serial!==S.loadSerial)return false;
+    if(ownedUrl){
+      if(S.imageUrl&&S.imageUrl!==ownedUrl)URL.revokeObjectURL(S.imageUrl);
+      S.imageUrl=ownedUrl;
+    }
+    return true;
   }catch(err){
     console.error(err);
-    if(serial===S.loadSerial)showStatus('画像を読み込めませんでした');
+    if(serial===S.loadSerial){
+      if(previous){
+        restorePuzzle(previous);
+        showStatus('読み込めませんでした。前のぬりえに戻りました');
+        E.status.classList.add('error');
+      }else{
+        S.ready=false;
+        showStatus('読み込めませんでした。「画像」から選び直してください');
+      }
+    }
+    return false;
   } finally {
     if(serial===S.loadSerial){
       E.upload.disabled=false;
       E.uploadBtn.disabled=false;
       E.resetBtn.disabled=false;
       E.againBtn.disabled=false;
+      if(E.detailToggle)E.detailToggle.disabled=false;
+      [E.zoomIn,E.zoomOut,E.zoomReset].forEach(b=>{if(b)b.disabled=false;});
     }
   }
 }
@@ -193,6 +239,7 @@ async function buildPuzzle(serial=S.loadSerial){
   ensureLabelsFit();
   compactPalette();
   // Digit boxes cover all eight palette numbers, so compaction preserves fit.
+  S.view={zoom:1,panX:0,panY:0};
   S.ready=true;
   resetPuzzle();
   renderPalette();
@@ -201,34 +248,7 @@ async function buildPuzzle(serial=S.loadSerial){
 }
 
 function buildDetailOverlay(image,W,H){
-  const N=W*H,lum=new Float32Array(N),dilated=new Float32Array(N),closed=new Float32Array(N);
-  const src=image.data;
-  for(let i=0;i<N;i++)lum[i]=src[i*4]*.2126+src[i*4+1]*.7152+src[i*4+2]*.0722;
-  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-    let v=0;
-    for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
-      const xx=clamp(x+dx,0,W-1),yy=clamp(y+dy,0,H-1);
-      v=Math.max(v,lum[yy*W+xx]);
-    }
-    dilated[y*W+x]=v;
-  }
-  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
-    let v=255;
-    for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
-      const xx=clamp(x+dx,0,W-1),yy=clamp(y+dy,0,H-1);
-      v=Math.min(v,dilated[yy*W+xx]);
-    }
-    closed[y*W+x]=v;
-  }
-  const c=document.createElement('canvas'); c.width=W;c.height=H;
-  const cctx=c.getContext('2d'),out=cctx.createImageData(W,H);
-  for(let i=0;i<N;i++){
-    const darkness=Math.min(1,Math.max(0,(205-lum[i])/55));
-    const alpha=Math.min(.68,Math.max(0,(closed[i]-lum[i]-8)/65))*darkness;
-    const p=i*4; out.data[p]=75;out.data[p+1]=56;out.data[p+2]=50;out.data[p+3]=alpha*255;
-  }
-  cctx.putImageData(out,0,0);
-  return c;
+  return window.NurieDetail.build(image,W,H);
 }
 
 async function bilateralFilter(image,W,H,radius,sigmaColor){
@@ -791,8 +811,10 @@ function renderPalette(){
     if(i===S.selected)b.classList.add('selected');
     if(colorFinished(i))b.classList.add('finished');
     b.onclick=()=>{
+      if(!S.ready)return;
       if(colorFinished(i))return;
       S.selected=i;
+      draw();
       renderPalette();
     };
     E.palette.appendChild(b);
@@ -819,9 +841,29 @@ function fit(){
   const cw=E.canvas.width,ch=E.canvas.height,ar=S.W/S.H;
   let w=cw,h=w/ar;
   if(h>ch){h=ch;w=h*ar}
-  S.fit={x:(cw-w)/2,y:(ch-h)/2,w,h};
+  const z=clamp(S.view.zoom,1,6);
+  w*=z;h*=z;
+  S.view.panX=clamp(S.view.panX,-Math.max(0,(w-cw)/2),Math.max(0,(w-cw)/2));
+  S.view.panY=clamp(S.view.panY,-Math.max(0,(h-ch)/2),Math.max(0,(h-ch)/2));
+  S.fit={x:(cw-w)/2+S.view.panX,y:(ch-h)/2+S.view.panY,w,h};
   return S.fit;
 }
+
+function setZoom(next,cx=E.canvas.width/2,cy=E.canvas.height/2){
+  if(!S.ready)return;
+  hideStatus();
+  const oldZoom=S.view.zoom;
+  const before=fit();
+  const ix=(cx-before.x)/before.w, iy=(cy-before.y)/before.h;
+  S.view.zoom=clamp(next,1,6);
+  const ratio=S.view.zoom/oldZoom;
+  const w=before.w*ratio,h=before.h*ratio;
+  S.view.panX=cx-ix*w-(E.canvas.width-w)/2;
+  S.view.panY=cy-iy*h-(E.canvas.height-h)/2;
+  draw();
+}
+
+function resetView(){S.view={zoom:1,panX:0,panY:0};draw();}
 
 function draw(){
   if(!S.ready||!S.regionMap||!S.regions.length)return;
@@ -834,7 +876,15 @@ function draw(){
     if(r.filled){
       d[p]=c[0];d[p+1]=c[1];d[p+2]=c[2];
     }else{
-      d[p]=253;d[p+1]=252;d[p+2]=249;
+      const active=r.color===S.selected;
+      if(active){
+        const c=S.palette[r.color],hatch=((i%W+Math.floor(i/W))%8)<2;
+        const mix=hatch?.24:.14;
+        d[p]=Math.round(253*(1-mix)+c[0]*mix);d[p+1]=Math.round(252*(1-mix)+c[1]*mix);d[p+2]=Math.round(249*(1-mix)+c[2]*mix);
+        if(hatch){d[p]=Math.round(d[p]*.82+148*.18);d[p+1]=Math.round(d[p+1]*.82+114*.18);d[p+2]=Math.round(d[p+2]*.82+130*.18);}
+      }else{
+        d[p]=253;d[p+1]=252;d[p+2]=249;
+      }
     }
     d[p+3]=255;
   }
@@ -900,6 +950,7 @@ function pickRegion(ev){
 
 function tap(ev){
   if(!S.ready)return;
+  hideStatus();
   const rid=pickRegion(ev);
   if(rid<0)return;
   const r=S.regions[rid];
@@ -908,7 +959,6 @@ function tap(ev){
   r.filled=true;
   S.filledCount++;
   updateProgress();
-  draw();
 
   if(colorFinished(S.selected)){
     const start=S.selected;
@@ -918,26 +968,59 @@ function tap(ev){
     }
   }
   renderPalette();
+  draw();
 
   if(S.filledCount===S.total)E.done.classList.add('show');
 }
 
-E.canvas.addEventListener('pointerdown',tap);
+const pointers=new Map();
+let gesture={moved:false,pinch:false,startX:0,startY:0,startZoom:1,startDistance:0};
+const canvasPoint=ev=>{const r=E.canvas.getBoundingClientRect();return {x:(ev.clientX-r.left)*(E.canvas.width/r.width),y:(ev.clientY-r.top)*(E.canvas.height/r.height)};};
+const pointerDistance=()=>{const a=[...pointers.values()];return a.length<2?0:Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y);};
+E.canvas.addEventListener('pointerdown',ev=>{
+  if(!S.ready)return;
+  const p=canvasPoint(ev);pointers.set(ev.pointerId,p);E.canvas.setPointerCapture?.(ev.pointerId);
+  if(pointers.size===1){gesture={moved:false,pinch:false,startX:p.x,startY:p.y,startZoom:S.view.zoom,startDistance:0};}
+  else if(pointers.size===2){gesture.pinch=true;gesture.startDistance=pointerDistance();gesture.startZoom=S.view.zoom;}
+});
+E.canvas.addEventListener('pointermove',ev=>{
+  if(!S.ready||!pointers.has(ev.pointerId))return;
+  const p=canvasPoint(ev),old=pointers.get(ev.pointerId);pointers.set(ev.pointerId,p);
+  if(pointers.size>=2){
+    const d=pointerDistance();if(d&&gesture.startDistance){
+      const a=[...pointers.values()];const cx=(a[0].x+a[1].x)/2,cy=(a[0].y+a[1].y)/2;
+      setZoom(gesture.startZoom*d/gesture.startDistance,cx,cy);
+    }
+    gesture.moved=true;return;
+  }
+  const ratio=E.canvas.width/E.canvas.getBoundingClientRect().width;
+  if(!gesture.moved&&Math.hypot(p.x-gesture.startX,p.y-gesture.startY)>5*ratio){
+    gesture.moved=true;S.view.panX+=p.x-gesture.startX;S.view.panY+=p.y-gesture.startY;draw();
+  }else if(gesture.moved){S.view.panX+=p.x-old.x;S.view.panY+=p.y-old.y;draw();}
+});
+const endPointer=ev=>{const wasTap=pointers.has(ev.pointerId)&&pointers.size===1&&!gesture.moved&&!gesture.pinch;pointers.delete(ev.pointerId);if(wasTap)tap(ev);if(!pointers.size)gesture={moved:false,pinch:false};};
+E.canvas.addEventListener('pointerup',endPointer);
+E.canvas.addEventListener('pointercancel',ev=>{pointers.delete(ev.pointerId);gesture.moved=true;if(!pointers.size)gesture={moved:false,pinch:false};});
+E.canvas.addEventListener('wheel',ev=>{if(!S.ready)return;ev.preventDefault();const p=canvasPoint(ev);setZoom(S.view.zoom*(ev.deltaY<0?1.2:1/1.2),p.x,p.y);},{passive:false});
 E.uploadBtn.onclick=()=>E.upload.click();
 E.upload.onchange=async()=>{
   const file=E.upload.files&&E.upload.files[0];
   if(!file)return;
-  if(S.imageUrl)URL.revokeObjectURL(S.imageUrl);
-  S.imageUrl=URL.createObjectURL(file);
-  await useSource(S.imageUrl);
+  const candidate=URL.createObjectURL(file);
+  const ok=await useSource(candidate,candidate);
+  if(!ok)URL.revokeObjectURL(candidate);
+  E.upload.value='';
 };
 E.resetBtn.onclick=()=>{
-  if(S.regions.length){resetPuzzle();renderPalette()}
+  if(S.ready&&S.regions.length){resetPuzzle();renderPalette()}
 };
 E.againBtn.onclick=()=>{
-  resetPuzzle();renderPalette();
+  if(S.ready){resetPuzzle();renderPalette();}
 };
 E.detailToggle?.addEventListener('change',draw);
+E.zoomIn?.addEventListener('click',()=>{if(S.ready)setZoom(S.view.zoom*1.35);});
+E.zoomOut?.addEventListener('click',()=>{if(S.ready)setZoom(S.view.zoom/1.35);});
+E.zoomReset?.addEventListener('click',()=>{if(S.ready)resetView();});
 
 new ResizeObserver(resize).observe(E.board);
 window.addEventListener('orientationchange',()=>setTimeout(resize,120));

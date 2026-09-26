@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#fff8f2">
 <title>のいちゃんのぬりえ</title>
 <link rel="stylesheet" href="styles.css">
@@ -37,10 +37,16 @@
   <footer>
     <div class="palette" id="palette" aria-label="色を選ぶ"></div>
     <div class="note" id="note"><span id="noteText">数字と同じ色を選んで、領域をタップ</span><label class="detailToggle"><input id="detailToggle" type="checkbox" checked> 細い線を表示（模様）</label></div>
+    <div class="viewControls" aria-label="表示操作">
+      <button class="smallBtn" id="zoomOut" type="button" aria-label="縮小">−</button>
+      <button class="smallBtn" id="zoomReset" type="button">全体</button>
+      <button class="smallBtn" id="zoomIn" type="button" aria-label="拡大">＋</button>
+    </div>
   </footer>
 
   <input id="upload" type="file" accept="image/*" hidden>
 </main>
+<script src="detail-lines.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
